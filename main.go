@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,6 +31,7 @@ const (
 	year         = "2016 - 2018"
 	copyright    = "\u00A9"
 	contributers = "kahluagenie, theherodied"
+	modified     = "mruediger"
 )
 
 var (
@@ -46,15 +46,25 @@ var (
 	debug string
 	// performence data
 	pdata string
+	//console data
+	cdata string
 	// version value
-	id        string
-	indexwarn *string
-	indexcrit *string
+	id                    string
+	indexwarn             *string
+	indexcrit             *string
+	uncommitWarn          *string
+	uncommitCrit          *string
+	processBufferTimeCrit *string
+	inputBufferCrit       *string
 )
 
 // handle performence data output
-func perf(elapsed, total, inputs, tput, index float64) {
-	pdata = fmt.Sprintf("time=%f;;;; total=%.f;;;; sources=%.f;;;; throughput=%.f;;;; index_failures=%.f;;;;", elapsed, total, inputs, tput, index)
+func perf(elapsed, total, inputs, tput, index float64, uncommited float64, processBufferTime float64, inputBuffer float64) {
+	pdata = fmt.Sprintf("time=%f;;;; total=%.f;;;; sources=%.f;;;; throughput=%.f;;;; index_failures=%.f;;;; uncommited=%.f;;;;; processbuffertime=%.10f;;;;; inputbufferate_m15=%.6f", elapsed, total, inputs, tput, index, uncommited, processBufferTime, inputBuffer)
+}
+func consoleOutput(elapsed, total float64, index float64, tput float64, inputs float64, uncommited float64, processBufferTime float64, inputBuffer float64) string {
+	cdata = fmt.Sprintf("%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\n%.f uncommited\n%.10f processbuffertime\n%.6f inputbufferrate m_15 \nCheck took %v\n", total, index, tput, inputs, uncommited, processBufferTime, inputBuffer, elapsed)
+	return cdata
 }
 
 // handle args
@@ -65,9 +75,12 @@ func init() {
 	ssl = flag.Bool("insecure", false, "Accept insecure SSL/TLS certificates. (optional)")
 	version = flag.Bool("version", false, "Display version and license information. (info)")
 	debug = os.Getenv(DEBUG)
-	perf(0, 0, 0, 0, 0)
+	perf(0, 0, 0, 0, 0, 0, 0, 0)
 	indexwarn = flag.String("w", "", "Index error warning limit. (optional)")
 	indexcrit = flag.String("c", "", "Index error critical limit. (optional)")
+	uncommitCrit = flag.String("uc", "", "Uncommited journal entries critical threshold. (optional)")
+	processBufferTimeCrit = flag.String("pbtc", "", "Process buffer Time critical threshold in s. (optional)")
+	inputBufferCrit = flag.String("ibc", "", "Input buffer rate below critical threshold in events/second. (optional)")
 }
 
 // return nagios codes on quit
@@ -145,41 +158,69 @@ func main() {
 	tput := query(c+"/system/throughput", *user, *pass)
 	inputs := query(c+"/system/inputs", *user, *pass)
 	total := query(c+"/count/total", *user, *pass)
+	uncommited := query(c+"/system/metrics/org.graylog2.journal.entries-uncommitted", *user, *pass)
+	processBufferTime := query(c+"/system/metrics/org.graylog2.shared.buffers.processors.ProcessBufferProcessor.processTime", *user, *pass)
+	inputBuffer := query(c+"/system/metrics/org.graylog2.shared.buffers.InputBufferImpl.incomingMessages", *user, *pass)
 
 	elapsed := time.Since(start)
 
 	// generate performance data output
-	perf(elapsed.Seconds(), total["events"].(float64), inputs["total"].(float64), tput["throughput"].(float64), index["total"].(float64))
+	perf(elapsed.Seconds(), total["events"].(float64), inputs["total"].(float64), tput["throughput"].(float64), index["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64))
 
-	// fix for backwards compatiblity if no index error threshold is set
-	if len(*indexwarn) == 0 || len(*indexcrit) == 0 {
-		quit(OK, fmt.Sprintf("Service is running!\n%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\nCheck took %v\n",
-			total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), elapsed), nil)
+	if len(*indexwarn) == 0 && len(*indexcrit) == 0 && len(*uncommitCrit) == 0 && len(*processBufferTimeCrit) == 0 && len(*inputBufferCrit) == 0 {
+		quit(CRITICAL, "no thresholds set", nil)
 	}
 
-	// convert indexwarn and indexcrit strings to float64 variables for comparison below
-	indexwarn2, err := strconv.ParseFloat((*indexwarn), 64)
-	if err != nil {
-		quit(UNKNOWN, "Cannot parse given index warning error value.", err)
+	if len(*indexwarn) != 0 {
+		// convert indexwarn and indexcrit strings to float64 variables for comparison below
+		indexwarn2, err := strconv.ParseFloat((*indexwarn), 64)
+		indexcrit2, err := strconv.ParseFloat((*indexcrit), 64)
+		if err != nil {
+			quit(UNKNOWN, "Cannot parse given index warning error value.", err)
+		}
+		if index["total"].(float64) >= indexwarn2 && index["total"].(float64) < indexcrit2 {
+			quit(WARNING, fmt.Sprintf("Index Failure above Warning Limit!\nService is running\n%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\nCheck took %v\n",
+				total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), elapsed), nil)
+		}
 	}
-	indexcrit2, err := strconv.ParseFloat((*indexcrit), 64)
-	if err != nil {
-		quit(UNKNOWN, "Cannot parse given index critical error value.", err)
+	if len(*indexcrit) != 0 {
+		indexcrit2, err := strconv.ParseFloat((*indexcrit), 64)
+		if err != nil {
+			quit(UNKNOWN, "Cannot parse given index critical error value.", err)
+		}
+		if index["total"].(float64) >= indexcrit2 {
+			quit(CRITICAL, fmt.Sprintf("Index Failure above Critical Limit!\nService is running\n%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\nCheck took %v\n",
+				total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), elapsed), nil)
+		}
 	}
-
-	// handle index thresholds
-	if index["total"].(float64) < indexwarn2 && index["total"].(float64) < indexcrit2 {
-		quit(OK, fmt.Sprintf("Service is running!\n%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\nCheck took %v\n",
-			total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), elapsed), nil)
+	if len(*uncommitCrit) != 0 {
+		uncommitCrit2, err := strconv.ParseFloat((*uncommitCrit), 64)
+		if err != nil {
+			quit(UNKNOWN, "Cannot parse given uncommited warning error value.", err)
+		}
+		if uncommited["value"].(float64) > uncommitCrit2 {
+			quit(CRITICAL, "Uncommited above Warning Limit!\nService is running\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
+		}
 	}
-	if index["total"].(float64) >= indexwarn2 && index["total"].(float64) < indexcrit2 {
-		quit(WARNING, fmt.Sprintf("Index Failure above Warning Limit!\nService is running\n%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\nCheck took %v\n",
-			total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), elapsed), nil)
+	if len(*processBufferTimeCrit) != 0 {
+		processBufferTimeCrit2, err := strconv.ParseFloat((*processBufferTimeCrit), 64)
+		if err != nil {
+			quit(UNKNOWN, "Cannot parse given process buffer time critical value.", err)
+		}
+		if processBufferTime["p95"].(float64) > processBufferTimeCrit2 {
+			quit(CRITICAL, "Process Buffer Time critical!\nService is running\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
+		}
 	}
-	if index["total"].(float64) >= indexcrit2 {
-		quit(CRITICAL, fmt.Sprintf("Index Failure above Critical Limit!\nService is running\n%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\nCheck took %v\n",
-			total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), elapsed), nil)
+	if len(*inputBufferCrit) != 0 {
+		inputBufferCrit2, err := strconv.ParseFloat((*inputBufferCrit), 64)
+		if err != nil {
+			quit(UNKNOWN, "Cannot parse given input buffer critical value.", err)
+		}
+		if inputBuffer["m15_rate"].(float64) < inputBufferCrit2 {
+			quit(CRITICAL, "Input Buffer rate below threshold!\nService is running\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
+		}
 	}
+	quit(OK, "Service is running!\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
 
 }
 
@@ -187,17 +228,7 @@ func main() {
 func query(target string, user string, pass string) map[string]interface{} {
 	var client *http.Client
 	var data map[string]interface{}
-
-	if *ssl {
-		tp := &http.Transport{
-			// keep this necessary evil for internal servers with custom certs?
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-
-		client = &http.Client{Transport: tp}
-	} else {
-		client = &http.Client{}
-	}
+	client = &http.Client{}
 
 	req, err := http.NewRequest("GET", target, nil)
 	req.SetBasicAuth(user, pass)
