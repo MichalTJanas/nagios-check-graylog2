@@ -40,8 +40,6 @@ var (
 	user    *string
 	pass    *string
 	version *bool
-	// using ssl to avoid name conflict with tls
-	ssl *bool
 	// env debugging variable
 	debug string
 	// performence data
@@ -72,7 +70,6 @@ func init() {
 	link = flag.String("l", "http://localhost:12900", "Graylog API URL")
 	user = flag.String("u", "", "API username")
 	pass = flag.String("p", "", "API password")
-	ssl = flag.Bool("insecure", false, "Accept insecure SSL/TLS certificates. (optional)")
 	version = flag.Bool("version", false, "Display version and license information. (info)")
 	debug = os.Getenv(DEBUG)
 	perf(0, 0, 0, 0, 0, 0, 0, 0)
