@@ -151,10 +151,12 @@ func main() {
 		quit(WARNING, fmt.Sprintf("lb_status: %v", system["lb_status"].(string)), nil)
 	}
 
-	index := query(c+"/system/indexer/failures", *user, *pass)
+	index := query(c+"/system/indexer/failures?limit=1&offset=0", *user, *pass)
 	tput := query(c+"/system/throughput", *user, *pass)
 	inputs := query(c+"/system/inputs", *user, *pass)
-	total := query(c+"/count/total", *user, *pass)
+	totalcounts := query(c+"/system/indexer/overview", *user, *pass)
+	// Added to access to {"counts":{"events":354106624}}
+	total := totalcounts["counts"].(map[string]interface{})
 	uncommited := query(c+"/system/metrics/org.graylog2.journal.entries-uncommitted", *user, *pass)
 	processBufferTime := query(c+"/system/metrics/org.graylog2.shared.buffers.processors.ProcessBufferProcessor.processTime", *user, *pass)
 	inputBuffer := query(c+"/system/metrics/org.graylog2.shared.buffers.InputBufferImpl.incomingMessages", *user, *pass)
