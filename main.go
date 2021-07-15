@@ -54,14 +54,16 @@ var (
 	uncommitCrit          *string
 	processBufferTimeCrit *string
 	inputBufferCrit       *string
+	critical_node         string
+	running_node          string
 )
 
 // handle performence data output
 func perf(elapsed, total, inputs, tput, index float64, uncommited float64, processBufferTime float64, inputBuffer float64) {
 	pdata = fmt.Sprintf("time=%f;;;; total=%.f;;;; sources=%.f;;;; throughput=%.f;;;; index_failures=%.f;;;; uncommited=%.f;;;;; processbuffertime=%.10f;;;;; inputbufferate_m15=%.6f", elapsed, total, inputs, tput, index, uncommited, processBufferTime, inputBuffer)
 }
-func consoleOutput(elapsed, total float64, index float64, tput float64, inputs float64, uncommited float64, processBufferTime float64, inputBuffer float64) string {
-	cdata = fmt.Sprintf("%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\n%.f uncommited\n%.10f processbuffertime\n%.6f inputbufferrate m_15 \nCheck took %v\n", total, index, tput, inputs, uncommited, processBufferTime, inputBuffer, elapsed)
+func consoleOutput(elapsed, total_cluster_nodes float64, running_node string, total float64, index float64, tput float64, inputs float64, uncommited float64, processBufferTime float64, inputBuffer float64) string {
+	cdata = fmt.Sprintf("All nodes in the Cluster: %v\nRunning nodes:\n%v\n%.f total events processed\n%.f index failures\n%.f throughput\n%.f sources\n%.f uncommited\n%.10f processbuffertime\n%.6f inputbufferrate m_15 \nCheck took %v\n", total_cluster_nodes, running_node, total, index, tput, inputs, uncommited, processBufferTime, inputBuffer, elapsed)
 	return cdata
 }
 
@@ -140,6 +142,34 @@ func main() {
 	c := parse(link)
 	start := time.Now()
 
+	cluster_nodes := query(c+"/system/cluster/nodes", *user, *pass)
+	total_cluster_nodes := cluster_nodes["total"]
+	all_cluster_nodes := cluster_nodes["nodes"].([]interface{})
+
+	var run_node_ok, run_node_err = 0, 0
+
+	for _, result := range all_cluster_nodes {
+
+		node := result.(map[string]interface{})
+		node_id := node["node_id"]
+		node_hostname := node["hostname"]
+
+		run_node := query(c+"/cluster", *user, *pass)
+		run_node_lc := run_node[node_id.(string)]
+
+		if run_node_lc == nil {
+			critical_node += fmt.Sprintf("Node: %v - not alive", node_hostname.(string))
+			run_node_err += 1
+		}
+
+		running_node += fmt.Sprintf("\tNode: %v - is alive\n", node_hostname.(string))
+		run_node_ok += 1
+	}
+
+	if len(critical_node) > 0 {
+		quit(CRITICAL, critical_node, nil)
+	}
+
 	system := query(c+"/system", *user, *pass)
 	if system["is_processing"].(bool) != true {
 		quit(CRITICAL, "Service is not processing!", nil)
@@ -154,9 +184,10 @@ func main() {
 	index := query(c+"/system/indexer/failures?limit=1&offset=0", *user, *pass)
 	tput := query(c+"/system/throughput", *user, *pass)
 	inputs := query(c+"/system/inputs", *user, *pass)
+
 	totalcounts := query(c+"/system/indexer/overview", *user, *pass)
-	// Added to access to {"counts":{"events":354106624}}
 	total := totalcounts["counts"].(map[string]interface{})
+
 	uncommited := query(c+"/system/metrics/org.graylog2.journal.entries-uncommitted", *user, *pass)
 	processBufferTime := query(c+"/system/metrics/org.graylog2.shared.buffers.processors.ProcessBufferProcessor.processTime", *user, *pass)
 	inputBuffer := query(c+"/system/metrics/org.graylog2.shared.buffers.InputBufferImpl.incomingMessages", *user, *pass)
@@ -198,7 +229,7 @@ func main() {
 			quit(UNKNOWN, "Cannot parse given uncommited warning error value.", err)
 		}
 		if uncommited["value"].(float64) > uncommitCrit2 {
-			quit(CRITICAL, "Uncommited above Warning Limit!\nService is running\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
+			quit(CRITICAL, "Uncommited above Warning Limit!\nService is running\n"+consoleOutput(elapsed.Seconds(), total_cluster_nodes.(float64), running_node, total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
 		}
 	}
 	if len(*processBufferTimeCrit) != 0 {
@@ -207,7 +238,7 @@ func main() {
 			quit(UNKNOWN, "Cannot parse given process buffer time critical value.", err)
 		}
 		if processBufferTime["p95"].(float64) > processBufferTimeCrit2 {
-			quit(CRITICAL, "Process Buffer Time critical!\nService is running\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
+			quit(CRITICAL, "Process Buffer Time critical!\nService is running\n"+consoleOutput(elapsed.Seconds(), total_cluster_nodes.(float64), running_node, total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
 		}
 	}
 	if len(*inputBufferCrit) != 0 {
@@ -216,10 +247,10 @@ func main() {
 			quit(UNKNOWN, "Cannot parse given input buffer critical value.", err)
 		}
 		if inputBuffer["m15_rate"].(float64) < inputBufferCrit2 {
-			quit(CRITICAL, "Input Buffer rate below threshold!\nService is running\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
+			quit(CRITICAL, "Input Buffer rate below threshold!\nService is running\n"+consoleOutput(elapsed.Seconds(), total_cluster_nodes.(float64), running_node, total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
 		}
 	}
-	quit(OK, "Service is running!\n"+consoleOutput(elapsed.Seconds(), total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
+	quit(OK, "Service is running!\n"+consoleOutput(elapsed.Seconds(), total_cluster_nodes.(float64), running_node, total["events"].(float64), index["total"].(float64), tput["throughput"].(float64), inputs["total"].(float64), uncommited["value"].(float64), processBufferTime["p95"].(float64), inputBuffer["m15_rate"].(float64)), nil)
 
 }
 
